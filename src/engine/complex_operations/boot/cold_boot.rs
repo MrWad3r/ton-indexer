@@ -630,7 +630,7 @@ async fn download_block_with_state(
         );
         match cell_writer.write(&shard_state.root_cell().hash(MAX_LEVEL).inner()) {
             Ok(path) => {
-                let mut file = File::open(&path)?;
+                let mut file = File::open(path)?;
                 let mut buffer = Vec::new();
                 file.read_to_end(&mut buffer)?;
                 let state = ShardState::construct_from_bytes(buffer.as_slice())?;
