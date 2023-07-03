@@ -7,6 +7,7 @@ pub use self::block_connection_storage::*;
 pub use self::block_handle_storage::*;
 pub use self::models::*;
 pub use self::runtime_storage::*;
+pub use self::shard_state_storage::CellWriter;
 
 use self::block_storage::*;
 use self::node_state_storage::*;

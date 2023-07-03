@@ -22,14 +22,14 @@ impl<'a> CellWriter<'a> {
     }
 
     #[allow(unused)]
-    pub fn write(&self, root_hash: &[u8; 32]) -> Result<()> {
+    pub fn write(&self, root_hash: &[u8; 32]) -> Result<PathBuf> {
         // Open target file in advance to get the error immediately (if any)
         let file_path = self.base_path.join(hex::encode(root_hash));
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .open(file_path)
+            .open(file_path.clone())
             .context("Failed to create target file")?;
 
         // Load cells from db in reverse order into the temp file
@@ -112,7 +112,7 @@ impl<'a> CellWriter<'a> {
 
         buffer.flush()?;
 
-        Ok(())
+        Ok(file_path)
     }
 }
 

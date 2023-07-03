@@ -13,6 +13,8 @@ use super::{BlockHandle, BlockHandleStorage, BlockStorage};
 use crate::db::*;
 use crate::utils::*;
 
+pub use cell_writer::CellWriter;
+
 mod cell_storage;
 mod cell_writer;
 mod entries_buffer;
