@@ -4,8 +4,11 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
+use crate::db;
 use anyhow::{Context, Result};
+use num_traits::ToPrimitive;
 use smallvec::SmallVec;
+use ton_types::{ByteOrderRead, UInt256};
 
 use crate::db::Db;
 use crate::utils::FastHashMap;
@@ -23,8 +26,12 @@ impl<'a> CellWriter<'a> {
 
     #[allow(unused)]
     pub fn write(&self, root_hash: &[u8; 32]) -> Result<PathBuf> {
+        let hash_hex = hex::encode(root_hash);
+        tracing::info!(cell_hash = hash_hex, "Started writing cell to a file",);
         // Open target file in advance to get the error immediately (if any)
+        let start = broxus_util::now();
         let file_path = self.base_path.join(hex::encode(root_hash));
+        tracing::info!(cell_hash = hash_hex, "Creating file: {:?}", &file_path);
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -33,10 +40,10 @@ impl<'a> CellWriter<'a> {
             .context("Failed to create target file")?;
 
         // Load cells from db in reverse order into the temp file
-        tracing::info!("started loading cells");
+        tracing::info!(cell_hash = hash_hex, "Started loading cells");
         let mut intermediate = write_rev_cells(self.db, self.base_path, root_hash)
             .context("Failed to write reversed cells data")?;
-        tracing::info!("finished loading cells");
+        tracing::info!(cell_hash = hash_hex, "Finished loading cells");
         let cell_count = intermediate.cell_sizes.len() as u32;
 
         // Compute offset type size (usually 4 bytes)
@@ -72,7 +79,7 @@ impl<'a> CellWriter<'a> {
         buffer.write_all(&[0, 0, 0, 0])?;
 
         // Cells index       | current len: 22 + offset_size
-        tracing::info!("started building index");
+        tracing::info!(cell_hash = hash_hex, "Started building index");
         {
             let mut next_offset = 0;
             for &cell_size in intermediate.cell_sizes.iter().rev() {
@@ -80,7 +87,7 @@ impl<'a> CellWriter<'a> {
                 buffer.write_all(&next_offset.to_be_bytes()[(8 - offset_size)..8])?;
             }
         }
-        tracing::info!("finished building index");
+        tracing::info!(cell_hash = hash_hex, "Finished building index");
 
         // Cells             | current len: 22 + offset_size * (1 + cell_sizes.len())
         let mut cell_buffer = [0; 2 + 128 + 4 * REF_SIZE];
@@ -111,7 +118,12 @@ impl<'a> CellWriter<'a> {
         }
 
         buffer.flush()?;
-
+        let end = broxus_util::now();
+        tracing::info!(
+            cell_hash = hash_hex,
+            "Writing state finished after {} secs",
+            end - start
+        );
         Ok(file_path)
     }
 }
@@ -183,19 +195,42 @@ fn write_rev_cells<P: AsRef<Path>>(
                     .ok_or(CellWriterError::CellNotFound)?;
 
                 let value = value.as_ref();
+                //println!("Value len {}", value.len());
+                let mut value = match db::refcount::strip_refcount(value) {
+                    Some(bytes) => bytes,
+                    None => return Err(CellWriterError::CellNotFound.into()),
+                };
+
                 if value.is_empty() {
                     return Err(CellWriterError::InvalidCell.into());
                 }
 
-                let (d1, d2, data) = deserialize_cell(&value[1..], &mut references_buffer)
+                let cell_data = ton_types::CellData::deserialize(&mut value)?;
+                let bit_length = cell_data.bit_length();
+                let d2 = (((bit_length >> 2) as u8) & !0b1) | ((bit_length % 8 != 0) as u8);
+
+                let references_count = cell_data.references_count();
+                let cell_type = cell_data
+                    .cell_type()
+                    .to_u8()
                     .ok_or(CellWriterError::InvalidCell)?;
+
+                let level_mask = cell_data.level_mask().mask();
+                let d1 =
+                    references_count as u8 | (((cell_type != 0x01) as u8) << 3) | (level_mask << 5);
+                let data = cell_data.data();
+
+                for _ in 0..references_count {
+                    let hash = UInt256::from(value.read_u256()?);
+                    references_buffer.push(hash.inner());
+                }
 
                 let mut reference_indices = SmallVec::with_capacity(references_buffer.len());
 
                 let mut indices_buffer = [0; 4];
                 let mut keys = [std::ptr::null(); 4];
                 let mut preload_count = 0;
-
+                //println!("we here 3");
                 for hash in &references_buffer {
                     let index = match indices.entry(*hash) {
                         hash_map::Entry::Vacant(entry) => {
@@ -222,6 +257,7 @@ fn write_rev_cells<P: AsRef<Path>>(
 
                     reference_indices.push(index);
                 }
+                //println!("we here 4");
 
                 stack.push((
                     index,
@@ -233,7 +269,7 @@ fn write_rev_cells<P: AsRef<Path>>(
                         indices: reference_indices,
                     }),
                 ));
-
+                //println!("we here 5");
                 if preload_count > 0 {
                     indices_buffer[..preload_count].reverse();
                     keys[..preload_count].reverse();
@@ -261,13 +297,14 @@ fn write_rev_cells<P: AsRef<Path>>(
 
                 iteration += 1;
                 if iteration % 100000 == 0 {
-                    tracing::info!(iteration);
+                    tracing::debug!("Iteration {iteration}",);
                 }
 
                 let cell_size = 2 + loaded.data.len() + loaded.indices.len() * REF_SIZE;
                 cell_sizes.push(cell_size as u8);
                 total_size += cell_size as u64;
 
+                //println!("we here 1.1");
                 temp_file_buffer.write_all(&[loaded.d1, loaded.d2])?;
                 temp_file_buffer.write_all(&loaded.data)?;
                 for index in loaded.indices {
@@ -280,6 +317,7 @@ fn write_rev_cells<P: AsRef<Path>>(
         }
     }
 
+    println!("we here 6");
     let mut file = temp_file_buffer.into_inner()?;
     file.flush()?;
 
@@ -289,69 +327,6 @@ fn write_rev_cells<P: AsRef<Path>>(
         total_size,
         _remove_on_drop: remove_on_drop,
     })
-}
-
-fn deserialize_cell<'a>(
-    value: &'a [u8],
-    references_buffer: &mut SmallVec<[[u8; 32]; 4]>,
-) -> Option<(u8, u8, &'a [u8])> {
-    let mut index = Index {
-        value_len: value.len(),
-        offset: 0,
-    };
-
-    index.require(3)?;
-    let cell_type = value[*index];
-    index.advance(1);
-    let bit_length = u16::from_le_bytes((&value[*index..*index + 2]).try_into().unwrap());
-    index.advance(2);
-
-    let d2 = (((bit_length >> 2) as u8) & !0b1) | ((bit_length % 8 != 0) as u8);
-
-    // TODO: Replace with `(big_length + 7) / 8`
-    let data_len = ((d2 >> 1) + u8::from(d2 & 1 != 0)) as usize;
-    index.require(data_len)?;
-    let data = &value[*index..*index + data_len];
-
-    // NOTE: additional byte is required here due to internal structure
-    index.advance(((bit_length + 8) / 8) as usize);
-
-    index.require(1)?;
-    let level_mask = value[*index];
-    // skip store_hashes
-    index.advance(2);
-
-    index.require(2)?;
-    let has_hashes = value[*index];
-    index.advance(1);
-    if has_hashes != 0 {
-        let count = value[*index];
-        index.advance(1 + (count * 32) as usize);
-    }
-
-    index.require(2)?;
-    let has_depths = value[*index];
-    index.advance(1);
-    if has_depths != 0 {
-        let count = value[*index];
-        index.advance(1 + (count * 2) as usize);
-    }
-
-    index.require(1)?;
-    let reference_count = value[*index];
-    index.advance(1);
-
-    let d1 = reference_count | (((cell_type != 0x01) as u8) << 3) | (level_mask << 5);
-
-    for _ in 0..reference_count {
-        index.require(32)?;
-        let mut hash = [0; 32];
-        hash.copy_from_slice(&value[*index..*index + 32]);
-        references_buffer.push(hash);
-        index.advance(32);
-    }
-
-    Some((d1, d2, data))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -385,36 +360,6 @@ impl Drop for RemoveOnDrop {
         if let Err(e) = std::fs::remove_file(&self.0) {
             tracing::error!(path = %self.0.display(), "failed to remove file: {e:?}");
         }
-    }
-}
-
-struct Index {
-    value_len: usize,
-    offset: usize,
-}
-
-impl Index {
-    #[inline(always)]
-    fn require(&self, len: usize) -> Option<()> {
-        if self.offset + len < self.value_len {
-            Some(())
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
-    fn advance(&mut self, bytes: usize) {
-        self.offset += bytes;
-    }
-}
-
-impl std::ops::Deref for Index {
-    type Target = usize;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        &self.offset
     }
 }
 

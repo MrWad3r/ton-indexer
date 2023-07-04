@@ -1,6 +1,3 @@
-use std::fs::File;
-use std::io::Read;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,8 +9,6 @@ use futures_util::stream::FuturesOrdered;
 use futures_util::{FutureExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use ton_block::{Deserializable, GetRepresentationHash, ShardState};
-use ton_types::MAX_LEVEL;
 
 use crate::engine::complex_operations::download_state::*;
 use crate::engine::{Engine, FullStateId};
@@ -614,9 +609,9 @@ async fn download_block_with_state(
         tracing::info!(block_id = %handle.id().display(), "downloading state");
         let shard_state = download_state(engine, full_state_id).await?;
         tracing::info!(block_id = %handle.id().display(), "downloaded state");
-        let hash = shard_state.root_cell().hash(MAX_LEVEL).to_hex_string();
+        //let hash = shard_state.root_cell().repr_hash();
 
-        let cell_writer = CellWriter::new(&engine.db, Path::new(&hash));
+        //let cell_writer = CellWriter::new(&engine.db, Path::new("./"));
 
         let state_hash = shard_state.root_cell().repr_hash();
         if state_update.new_hash != state_hash {
@@ -624,24 +619,28 @@ async fn download_block_with_state(
         }
 
         engine.store_state(&handle, &shard_state).await?;
-        tracing::info!(
-            "Serializing persistent state to a file. Root hash {}",
-            &hash
-        );
-        match cell_writer.write(&shard_state.root_cell().hash(MAX_LEVEL).inner()) {
-            Ok(path) => {
-                let mut file = File::open(path)?;
-                let mut buffer = Vec::new();
-                file.read_to_end(&mut buffer)?;
-                let state = ShardState::construct_from_bytes(buffer.as_slice())?;
-                if state.hash()? == state_hash {
-                    tracing::info!("Successfully serialized. Hashes are equal");
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to serialize persistent state. Err: {e:?}");
-            }
-        };
+        // tracing::info!(
+        //     "Serializing persistent state to a file. Root hash {}",
+        //     &hash
+        // );
+        // match cell_writer.write(hash.as_slice()) {
+        //     Ok(path) => {
+        //         tracing::info!("Wrote successfully");
+        //         let mut file = File::open(path)?;
+        //         let mut buffer = Vec::new();
+        //         file.read_to_end(&mut buffer)?;
+        //
+        //         let state = ShardState::construct_from_bytes(buffer.as_slice())?;
+        //         if state.hash()? == state_hash {
+        //             tracing::info!("Successfully serialized. Hashes are equal");
+        //         } else {
+        //             tracing::error!("Hashes are not equal");
+        //         }
+        //     }
+        //     Err(e) => {
+        //         tracing::error!("Failed to serialize persistent state. Err: {e:?}");
+        //     }
+        // };
         engine
             .notify_subscribers_with_full_state(&shard_state)
             .await?;
